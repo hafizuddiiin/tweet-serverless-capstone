@@ -1,8 +1,3 @@
-# Capstone project - Tweet Serverless 
-
-# How to run the application
-```
-
 ## Frontend
 
 ```
