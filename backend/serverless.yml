@@ -1,0 +1,212 @@
+service:
+  name: serverless-tweet-app
+
+plugins:
+  - serverless-webpack
+  - serverless-iam-roles-per-function
+  - serverless-reqvalidator-plugin
+  - serverless-aws-documentation
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-southeast-1'}
+
+  tracing:
+    lambda: true
+    apiGateway: true
+
+  environment: 
+    TWEETS_DYNAMODB_TABLE: Tweets
+    IMAGES_S3_BUCKET: serverless-tweet-images
+    SIGNED_URL_EXPIRATION: 300
+
+custom:
+
+  serverless-iam-roles-per-function:
+      defaultInherit: true
+
+  documentation:
+    api:
+      info:
+        version: v1.0.0
+        title: Tweet API
+        description: Serverless tweet app
+    models:
+      - name: CreateTweetRequest
+        contentType: application/json
+        schema: ${file(models/create-tweet-request.json)}
+      - name: UpdateTweetRequest
+        contentType: application/json
+        schema: ${file(models/update-tweet-request.json)}
+
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  GetTweets:
+    handler: src/lambda/http/getTweets.handler
+    events:
+      - http:
+          method: get
+          path: tweets
+          cors: true
+          authorizer: Auth
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.TWEETS_DYNAMODB_TABLE}
+
+  CreateTweet:
+    handler: src/lambda/http/createTweet.handler
+    events:
+      - http:
+          method: post
+          path: tweets
+          cors: true
+          authorizer: Auth
+          reqValidatorName: RequestValidator
+          documentation:
+            summary: Create a new tweet
+            description: Create a new tweet
+            requestModels:
+              'application/json': CreateTweetRequest
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource: arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.TWEETS_DYNAMODB_TABLE}
+
+
+  UpdateTweet:
+    handler: src/lambda/http/updateTweet.handler
+    events:
+      - http:
+          method: patch
+          path: tweets/{tweetId}
+          cors: true
+          authorizer: Auth
+          reqValidatorName: RequestValidator
+          documentation:
+            summary: Update tweet
+            description: Update tweet
+            requestModels:
+              'application/json': UpdateTweetRequest
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.TWEETS_DYNAMODB_TABLE}
+
+  DeleteTweet:
+    handler: src/lambda/http/deleteTweet.handler
+    events:
+      - http:
+          method: delete
+          path: tweets/{tweetId}
+          cors: true
+          authorizer: Auth
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:DeleteItem
+        Resource: arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.TWEETS_DYNAMODB_TABLE}
+
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    events:
+      - http:
+          method: post
+          path: tweets/{tweetId}/attachment
+          cors: true
+          authorizer: Auth
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.TWEETS_DYNAMODB_TABLE}
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+          - s3:GetObject
+        Resource: arn:aws:s3:::${self:provider.environment.IMAGES_S3_BUCKET}/*      
+
+resources:
+  Resources:
+    Gateway:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Credentials: "'true'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'*'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+    TweetsDynamoDbTable:
+          Type: AWS::DynamoDB::Table
+          Properties:
+            TableName: ${self:provider.environment.TWEETS_DYNAMODB_TABLE}
+            AttributeDefinitions:
+            - AttributeName: userId
+              AttributeType: S
+            - AttributeName: tweetId
+              AttributeType: S
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: tweetId
+                KeyType: RANGE
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
+    
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.IMAGES_S3_BUCKET}
+        CorsConfiguration:
+          CorsRules:
+            -
+              AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: "2012-10-17"
+          Statement:
+            - Sid: PublicReadForGetBucketObjects
+              Effect: Allow
+              Principal: '*'
+              Action: 's3:GetObject'
+              Resource: 'arn:aws:s3:::${self:provider.environment.IMAGES_S3_BUCKET}/*'
+        Bucket: !Ref AttachmentsBucket
+
+    RequestValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties:
+        Name: 'request-validator'
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ValidateRequestBody: true
+        ValidateRequestParameters: false
